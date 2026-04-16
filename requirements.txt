@@ -2,4 +2,5 @@ streamlit
 yfinance
 pandas
 pytz
-requests
+scipy
+numpy
