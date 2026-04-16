@@ -5,7 +5,7 @@ import pytz
 import yfinance as yf
 
 # App Setup
-st.set_page_config(page_title="XSP 0DTE Strategy", layout="centered") # 'centered' is better for mobile
+st.set_page_config(page_title="XSP 0DTE Strategy", layout="centered") 
 st.title("📊 XSP 0DTE Iron Condor")
 
 SYMBOL = "^XSP"
@@ -16,13 +16,20 @@ def get_data():
     try:
         ticker = yf.Ticker(SYMBOL)
         
-        # Using fast_info for the spot price
-        info = ticker.fast_info
-        spot_price = info.last_price
+        # Pulling 1 day of 1-minute data is the most reliable way to get 
+        # both the latest price and the actual trade timestamp
+        hist = ticker.history(period="1d", interval="1m")
         
-        # Yahoo Timestamp
+        if hist.empty:
+            return {"error": "No price data found. Is the market open?"}
+        
+        # Get the very last row
+        latest_row = hist.iloc[-1]
+        spot_price = float(latest_row['Close'])
+        
+        # Get the timestamp from the index (the time of the last 1m candle)
         tz = pytz.timezone('US/Eastern')
-        yahoo_ts = datetime.fromtimestamp(info.last_volume_time / 1000, tz=tz)
+        yahoo_ts = hist.index[-1].astimezone(tz)
 
         # 0DTE Expiry Logic
         expirations = ticker.options
@@ -32,9 +39,9 @@ def get_data():
         # Fetch Option Chain
         chain = ticker.option_chain(target_expiry)
         
-        # Strike Selection (.15 Delta Approx)
-        short_put = chain.puts[chain.puts['strike'] <= spot_price * 0.985].iloc[-1]['strike']
-        short_call = chain.calls[chain.calls['strike'] >= spot_price * 1.015].iloc[0]['strike']
+        # Strike Selection (.15 Delta Approx: ~1.5% OTM)
+        short_put = float(chain.puts[chain.puts['strike'] <= spot_price * 0.985].iloc[-1]['strike'])
+        short_call = float(chain.calls[chain.calls['strike'] >= spot_price * 1.015].iloc[0]['strike'])
 
         return {
             "spot": spot_price,
@@ -52,26 +59,26 @@ def get_data():
 
 # --- UI DISPLAY (Mobile Optimized) ---
 if st.button('🚀 Pull Strategy Data'):
-    with st.spinner('Accessing Yahoo Finance...'):
+    with st.spinner('Updating from Yahoo Finance...'):
         data = get_data()
     
     if "error" in data:
-        st.error(f"Rate Limit Active: {data['error']}")
+        st.error(f"Issue Found: {data['error']}")
+        st.info("Yahoo might be limiting the cloud connection. Try again in 30-60 seconds.")
     else:
         st.success("Data Updated")
         
-        # 1. Price and Time (Top)
+        # 1. Price and Time (Vertical stack for mobile)
         st.metric("XSP Spot Price", f"${data['spot']:.2f}")
         st.write(f"**Yahoo Timestamp:** {data['ts'].strftime('%I:%M:%S %p %Z')}")
         st.write(f"**Target Expiry:** {data['expiry']}")
         
         st.divider()
 
-        # 2. Strikes Data (Below, in a full-width table)
+        # 2. Strikes Data (Large table below for easy reading)
         st.write("### 🎯 Selected Strikes")
         
-        # Formatting strikes to 2 decimals
-        strike_data = {
+        strike_table = pd.DataFrame({
             "Leg": ["Long Put (Buy)", "Short Put (Sell)", "Short Call (Sell)", "Long Call (Buy)"],
             "Strike": [
                 f"{data['strikes']['Long Put']:.2f}",
@@ -79,10 +86,7 @@ if st.button('🚀 Pull Strategy Data'):
                 f"{data['strikes']['Short Call']:.2f}",
                 f"{data['strikes']['Long Call']:.2f}"
             ]
-        }
+        })
         
-        df = pd.DataFrame(strike_data)
-        # Using st.table instead of dataframe for better static mobile rendering
-        st.table(df)
-
-        st.caption("Strategy: 0DTE Iron Condor | Selection: ~0.15 Delta")
+        st.table(strike_table)
+        st.caption("Strategy: 0DTE Iron Condor | Selection: ~0.15 Delta | Width: $5.00")
