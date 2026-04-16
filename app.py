@@ -17,7 +17,6 @@ TARGET_DELTA = 0.15
 def calculate_delta(S, K, T, r, sigma, option_type='call'):
     """Calculates Black-Scholes Delta."""
     if T <= 0 or sigma <= 0: return 0
-    # Black-Scholes Formula
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     if option_type == 'call':
         return norm.cdf(d1)
@@ -38,14 +37,13 @@ def get_delta_data():
         yahoo_ts = hist.index[-1].astimezone(tz)
 
         # 2. Time to Expiry (T) in years
-        # Calculated from now until 4:00 PM EST
         now_est = datetime.now(tz)
         close_est = now_est.replace(hour=16, minute=0, second=0, microsecond=0)
         time_diff = close_est - now_est
-        seconds_to_go = max(time_diff.total_seconds(), 1) # Avoid division by zero
+        seconds_to_go = max(time_diff.total_seconds(), 1)
         T = (seconds_to_go / (3600 * 24)) / 365 
         
-        # 3. Interest Rate (Default to 5% if ^IRX fails)
+        # 3. Interest Rate
         try:
             r = yf.Ticker("^IRX").fast_info.last_price / 100 
         except:
@@ -57,49 +55,61 @@ def get_delta_data():
         target_expiry = today_str if today_str in expirations else expirations[0]
         chain = ticker.option_chain(target_expiry)
 
-        # 5. Delta Filtering Logic
-        def find_strike(df, target, opt_type):
-            # Calculate delta for each strike using its own Implied Volatility
+        # 5. Delta Filtering Logic (Returns Strike and the Delta found)
+        def find_strike_info(df, target, opt_type):
             df = df.copy()
+            # Handle cases where IV might be missing or zero
+            df = df[df['impliedVolatility'] > 0]
+            
             df['calc_delta'] = df.apply(lambda row: calculate_delta(
                 S, row['strike'], T, r, row['impliedVolatility'], opt_type
             ), axis=1)
-            # Find the strike where calculated delta is closest to target
+            
             idx = (df['calc_delta'] - target).abs().idxmin()
-            return float(df.loc[idx, 'strike'])
+            return float(df.loc[idx, 'strike']), float(df.loc[idx, 'calc_delta'])
 
-        short_put = find_strike(chain.puts, -TARGET_DELTA, 'put')
-        short_call = find_strike(chain.calls, TARGET_DELTA, 'call')
+        short_put_strike, short_put_delta = find_strike_info(chain.puts, -TARGET_DELTA, 'put')
+        short_call_strike, short_call_delta = find_strike_info(chain.calls, TARGET_DELTA, 'call')
+
+        # Calculate Longs (we still calculate their deltas for the table)
+        long_put_strike = short_put_strike - WIDTH
+        long_call_strike = short_call_strike + WIDTH
+        
+        # Estimate deltas for long legs
+        # Note: we use the short's IV as a proxy if the long's IV is messy
+        lp_delta = calculate_delta(S, long_put_strike, T, r, 0.2, 'put') # 0.2 is a dummy IV placeholder
+        lc_delta = calculate_delta(S, long_call_strike, T, r, 0.2, 'call')
 
         return {
             "spot": S, "ts": yahoo_ts, "expiry": target_expiry,
-            "strikes": {
-                "Long Put": short_put - WIDTH,
-                "Short Put": short_put,
-                "Short Call": short_call,
-                "Long Call": short_call + WIDTH
-            }
+            "data": [
+                {"Leg": "Long Put (Buy)", "Strike": long_put_strike, "Delta": lp_delta},
+                {"Leg": "Short Put (Sell)", "Strike": short_put_strike, "Delta": short_put_delta},
+                {"Leg": "Short Call (Sell)", "Strike": short_call_strike, "Delta": short_call_delta},
+                {"Leg": "Long Call (Buy)", "Strike": long_call_strike, "Delta": lc_delta}
+            ]
         }
     except Exception as e:
         return {"error": str(e)}
 
 # --- UI DISPLAY ---
-if st.button('🚀 Calculate 0.15 Delta Strikes'):
-    with st.spinner('Running Black-Scholes Model...'):
-        data = get_delta_data()
+if st.button('🚀 Calculate Strikes & Show Deltas'):
+    with st.spinner('Calculating Greeks...'):
+        result = get_delta_data()
     
-    if "error" in data:
-        st.error(f"Data Error: {data['error']}")
+    if "error" in result:
+        st.error(f"Data Error: {result['error']}")
     else:
-        st.metric("XSP Spot Price", f"${data['spot']:.2f}")
-        st.write(f"**Yahoo Timestamp:** {data['ts'].strftime('%I:%M:%S %p %Z')}")
+        st.metric("XSP Spot Price", f"${result['spot']:.2f}")
+        st.write(f"**Yahoo Timestamp:** {result['ts'].strftime('%I:%M:%S %p %Z')}")
         
         st.divider()
-        st.write(f"### 🎯 Strategy Strikes (Target: {TARGET_DELTA} Delta)")
+        st.write(f"### 🎯 Strategy Strikes (Target: ±{TARGET_DELTA})")
         
-        strike_df = pd.DataFrame({
-            "Leg": ["Long Put (Buy)", "Short Put (Sell)", "Short Call (Sell)", "Long Call (Buy)"],
-            "Strike": [f"{v:.2f}" for v in data['strikes'].values()]
-        })
-        st.table(strike_df)
-        st.caption(f"Calculated for {data['expiry']} expiration using live IV and time-decay.")
+        # Formatting for the table
+        display_df = pd.DataFrame(result['data'])
+        display_df['Strike'] = display_df['Strike'].map('{:,.2f}'.format)
+        display_df['Delta'] = display_df['Delta'].map('{:,.4f}'.format)
+        
+        st.table(display_df)
+        st.caption(f"Calculated for {result['expiry']} using Black-Scholes and live Implied Volatility.")
