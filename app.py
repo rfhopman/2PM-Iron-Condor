@@ -12,10 +12,10 @@ st.title("📊 XSP 0DTE Iron Condor")
 
 SYMBOL = "^XSP"
 WIDTH = 5.00
-TARGET_DELTA = 0.15
+TARGET_DELTA_SCALED = 15.0  # We now use the whole number target
 
 def calculate_delta(S, K, T, r, sigma, option_type='call'):
-    """Calculates Black-Scholes Delta."""
+    """Calculates Black-Scholes Delta (decimal)."""
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     if option_type == 'call':
@@ -55,30 +55,29 @@ def get_delta_data():
         target_expiry = today_str if today_str in expirations else expirations[0]
         chain = ticker.option_chain(target_expiry)
 
-        # 5. Delta Filtering Logic (Returns Strike and the Delta found)
-        def find_strike_info(df, target, opt_type):
+        # 5. Delta Filtering Logic (Looking for Delta * 100)
+        def find_strike_info(df, target_scaled, opt_type):
             df = df.copy()
-            # Handle cases where IV might be missing or zero
             df = df[df['impliedVolatility'] > 0]
             
-            df['calc_delta'] = df.apply(lambda row: calculate_delta(
+            # Calculate and scale delta to x100
+            df['calc_delta_scaled'] = df.apply(lambda row: calculate_delta(
                 S, row['strike'], T, r, row['impliedVolatility'], opt_type
-            ), axis=1)
+            ) * 100, axis=1)
             
-            idx = (df['calc_delta'] - target).abs().idxmin()
-            return float(df.loc[idx, 'strike']), float(df.loc[idx, 'calc_delta'])
+            idx = (df['calc_delta_scaled'] - target_scaled).abs().idxmin()
+            return float(df.loc[idx, 'strike']), float(df.loc[idx, 'calc_delta_scaled'])
 
-        short_put_strike, short_put_delta = find_strike_info(chain.puts, -TARGET_DELTA, 'put')
-        short_call_strike, short_call_delta = find_strike_info(chain.calls, TARGET_DELTA, 'call')
+        short_put_strike, short_put_delta = find_strike_info(chain.puts, -TARGET_DELTA_SCALED, 'put')
+        short_call_strike, short_call_delta = find_strike_info(chain.calls, TARGET_DELTA_SCALED, 'call')
 
-        # Calculate Longs (we still calculate their deltas for the table)
+        # Calculate Longs
         long_put_strike = short_put_strike - WIDTH
         long_call_strike = short_call_strike + WIDTH
         
-        # Estimate deltas for long legs
-        # Note: we use the short's IV as a proxy if the long's IV is messy
-        lp_delta = calculate_delta(S, long_put_strike, T, r, 0.2, 'put') # 0.2 is a dummy IV placeholder
-        lc_delta = calculate_delta(S, long_call_strike, T, r, 0.2, 'call')
+        # Estimate deltas for long legs (using nearby IV)
+        lp_delta = calculate_delta(S, long_put_strike, T, r, 0.2, 'put') * 100
+        lc_delta = calculate_delta(S, long_call_strike, T, r, 0.2, 'call') * 100
 
         return {
             "spot": S, "ts": yahoo_ts, "expiry": target_expiry,
@@ -93,7 +92,7 @@ def get_delta_data():
         return {"error": str(e)}
 
 # --- UI DISPLAY ---
-if st.button('🚀 Calculate Strikes & Show Deltas'):
+if st.button('🚀 Calculate 15-Delta Strategy'):
     with st.spinner('Calculating Greeks...'):
         result = get_delta_data()
     
@@ -104,12 +103,12 @@ if st.button('🚀 Calculate Strikes & Show Deltas'):
         st.write(f"**Yahoo Timestamp:** {result['ts'].strftime('%I:%M:%S %p %Z')}")
         
         st.divider()
-        st.write(f"### 🎯 Strategy Strikes (Target: ±{TARGET_DELTA})")
+        st.write(f"### 🎯 Strategy Strikes (Target: ±{TARGET_DELTA_SCALED})")
         
         # Formatting for the table
         display_df = pd.DataFrame(result['data'])
         display_df['Strike'] = display_df['Strike'].map('{:,.2f}'.format)
-        display_df['Delta'] = display_df['Delta'].map('{:,.4f}'.format)
+        display_df['Delta'] = display_df['Delta'].map('{:,.2f}'.format)
         
         st.table(display_df)
-        st.caption(f"Calculated for {result['expiry']} using Black-Scholes and live Implied Volatility.")
+        st.caption("Delta values are scaled (x100) to match standard trading platform displays.")
